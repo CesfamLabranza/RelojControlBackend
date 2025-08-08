@@ -1,10 +1,10 @@
 import pandas as pd
-import re
 from datetime import datetime, time
-from openpyxl.styles import PatternFill
 from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
+from io import BytesIO
+import re
 
-# Lista de feriados Chile 2025
 FERIADOS_2025 = [
     "2025-01-01", "2025-04-18", "2025-04-19", "2025-05-01",
     "2025-05-21", "2025-06-29", "2025-07-16", "2025-08-15",
@@ -13,16 +13,20 @@ FERIADOS_2025 = [
 ]
 FERIADOS_2025 = [datetime.strptime(d, "%Y-%m-%d").date() for d in FERIADOS_2025]
 
+# ========== Funciones auxiliares (sin cambios) ==========
+
 def normalizar_fecha(fecha):
     if isinstance(fecha, datetime):
         return fecha.date()
     try:
-        return datetime.strptime(str(fecha).strip(), "%d-%m-%Y").date()
+        fecha_str = str(fecha).strip()
+        if "-" in fecha_str:
+            return datetime.strptime(fecha_str, "%d-%m-%Y").date()
+        elif "/" in fecha_str:
+            return datetime.strptime(fecha_str, "%d/%m/%Y").date()
     except:
-        try:
-            return datetime.strptime(str(fecha).strip(), "%d/%m/%Y").date()
-        except:
-            return None
+        return None
+    return None
 
 def convertir_a_hhmm(horas):
     minutos = int(round(horas * 60))
@@ -66,14 +70,17 @@ def calcular_atraso(entrada, fecha, turno):
 def calcular_horas_extras(entrada, salida, fecha, turno, descripcion):
     if not entrada or not salida or entrada == "-" or salida == "-" or "ausente" in descripcion.lower() or "libre" in descripcion.lower():
         return 0, 0
+
     fecha_dt = normalizar_fecha(fecha)
     if not fecha_dt:
         return 0, 0
+
     try:
         entrada_dt = datetime.strptime(str(entrada), "%H:%M:%S")
         salida_dt = datetime.strptime(str(salida), "%H:%M:%S")
     except:
         return 0, 0
+
     if salida_dt < entrada_dt:
         salida_dt += pd.Timedelta(days=1)
 
@@ -106,55 +113,61 @@ def calcular_horas_extras(entrada, salida, fecha, turno, descripcion):
     horas_25 = round(minutos_25 / 60, 2) if minutos_25 > 30 else 0
     return horas_50, horas_25
 
-def procesar_excel(entrada, salida):
-    df_raw = pd.read_excel(entrada, engine="xlrd")
+# ========== FUNCIÓN PRINCIPAL ==========
+
+def procesar_excel(file_stream):
+    wb = load_workbook(filename=file_stream)
+    sheet = wb.active
 
     data_detalle = []
     data_resumen = {}
+    fila = 1
+    max_row = sheet.max_row
     funcionario = rut = organigrama = turno = periodo = ""
 
-    i = 0
-    while i < len(df_raw):
-        celda = str(df_raw.iloc[i, 0]).strip().lower()
+    while fila <= max_row:
+        celda = str(sheet.cell(row=fila, column=1).value).strip().lower()
         if celda.startswith("funcionario"):
-            funcionario = str(df_raw.iloc[i, 1]).strip(": ")
-            rut = str(df_raw.iloc[i + 1, 1]).strip(": ")
-            organigrama = str(df_raw.iloc[i + 2, 1]).strip(": ")
-            turno = str(df_raw.iloc[i + 3, 1]).strip(": ")
-            periodo = str(df_raw.iloc[i + 4, 1]).strip(": ")
-            i += 6
+            funcionario = str(sheet.cell(row=fila, column=2).value).strip(": ")
+            rut = str(sheet.cell(row=fila + 1, column=2).value).strip(": ")
+            organigrama = str(sheet.cell(row=fila + 2, column=2).value).strip(": ")
+            turno = str(sheet.cell(row=fila + 3, column=2).value).strip(": ")
+            periodo = str(sheet.cell(row=fila + 4, column=2).value).strip(": ")
+            fila += 6
             continue
 
         if celda == "dia":
-            i += 1
-            while i < len(df_raw) and str(df_raw.iloc[i, 0]).strip():
-                dia_text = str(df_raw.iloc[i, 0]).strip().lower()
-                if dia_text == "totales" or dia_text.startswith("funcionario"):
+            fila += 1
+            while fila <= max_row and sheet.cell(row=fila, column=1).value:
+                dia_text = str(sheet.cell(row=fila, column=1).value).strip().lower()
+                if dia_text == "totales":
+                    fila += 1
+                    continue
+                if dia_text.startswith("funcionario") or dia_text == "none":
                     break
 
-                fecha = df_raw.iloc[i, 1]
-                entrada_val = df_raw.iloc[i, 2]
-                salida_val = df_raw.iloc[i, 3]
-                descripcion = str(df_raw.iloc[i, 5])
+                fecha = sheet.cell(row=fila, column=2).value
+                entrada = sheet.cell(row=fila, column=3).value
+                salida = sheet.cell(row=fila, column=4).value
+                descripcion = str(sheet.cell(row=fila, column=6).value).strip()
 
-                atraso = calcular_atraso(entrada_val, fecha, turno)
-                h50, h25 = calcular_horas_extras(entrada_val, salida_val, fecha, turno, descripcion)
+                atraso_min = calcular_atraso(entrada, fecha, turno)
+                horas_50, horas_25 = calcular_horas_extras(entrada, salida, fecha, turno, descripcion)
 
                 data_detalle.append([
-                    funcionario, rut, organigrama, turno, periodo,
-                    fecha, entrada_val, salida_val,
-                    minutos_a_hhmm(atraso), convertir_a_hhmm(h50), convertir_a_hhmm(h25), descripcion
+                    funcionario, rut, organigrama, turno, periodo, fecha, entrada, salida,
+                    minutos_a_hhmm(atraso_min), convertir_a_hhmm(horas_50), convertir_a_hhmm(horas_25), descripcion
                 ])
 
                 if funcionario not in data_resumen:
                     data_resumen[funcionario] = {"Rut": rut, "Organigrama": organigrama, "Turno": turno, "Periodo": periodo,
                                                  "Total 50%": 0, "Total 25%": 0, "Total Atraso": 0}
-                data_resumen[funcionario]["Total 50%"] += h50
-                data_resumen[funcionario]["Total 25%"] += h25
-                data_resumen[funcionario]["Total Atraso"] += atraso
-                i += 1
+                data_resumen[funcionario]["Total 50%"] += horas_50
+                data_resumen[funcionario]["Total 25%"] += horas_25
+                data_resumen[funcionario]["Total Atraso"] += atraso_min
+                fila += 1
         else:
-            i += 1
+            fila += 1
 
     df_detalle = pd.DataFrame(data_detalle, columns=[
         "Funcionario", "Rut", "Organigrama", "Turno", "Periodo",
@@ -172,26 +185,30 @@ def procesar_excel(entrada, salida):
         for f in data_resumen
     ], columns=["Funcionario", "Rut", "Organigrama", "Turno", "Periodo", "Total 50%", "Total 25%", "Total Atraso", "Total Horas"])
 
-    with pd.ExcelWriter(salida, engine="openpyxl") as writer:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df_detalle.to_excel(writer, sheet_name="Detalle Diario", index=False)
         df_resumen.to_excel(writer, sheet_name="Resumen", index=False)
 
-    # Aplicar colores
-    wb = load_workbook(salida)
-    ws = wb["Detalle Diario"]
+    # Pintar colores
+    output.seek(0)
+    wb_final = load_workbook(output)
+    ws = wb_final["Detalle Diario"]
     fill_rojo = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
     fill_amarillo = PatternFill(start_color="FFFACD", end_color="FFFACD", fill_type="solid")
 
     for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=12):
-        descripcion = str(row[11].value).strip().lower()
+        descripcion = str(row[11].value)
         entrada = str(row[6].value).strip()
         salida = str(row[7].value).strip()
-
-        if "ausente" in descripcion:
+        if descripcion and "Ausente" in descripcion:
             for cell in row:
                 cell.fill = fill_rojo
-        elif "falta entrada" in descripcion or "falta salida" in descripcion or entrada == "-" or salida == "-":
+        elif "Falta Entrada" in descripcion or "Falta Salida" in descripcion or entrada == "-" or salida == "-":
             for cell in row:
                 cell.fill = fill_amarillo
 
-    wb.save(salida)
+    final_output = BytesIO()
+    wb_final.save(final_output)
+    final_output.seek(0)
+    return final_output
