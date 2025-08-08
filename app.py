@@ -6,7 +6,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return "Backend RelojControl OK"
 
 @app.route("/procesar", methods=["POST"])
 def procesar():
@@ -17,32 +17,17 @@ def procesar():
     if archivo.filename == '':
         return "Nombre de archivo vacío", 400
 
-    ruta_entrada = "entrada.xls"
+    # Guardar temporalmente como .xls o .xlsx
+    extension = os.path.splitext(archivo.filename)[1]
+    ruta_entrada = f"entrada{extension}"
     ruta_salida = "salida.xlsx"
     archivo.save(ruta_entrada)
 
-    procesar_excel(ruta_entrada, ruta_salida)
-    return send_file(ruta_salida, as_attachment=True)
-
-# (Esta parte no se usa actualmente pero se puede activar después)
-CLAVES_VALIDAS = {
-    "infolabranza": "archivos/labranza.xlsx",
-    # Agrega más claves si deseas habilitar descargas
-}
-
-@app.route("/descargar", methods=["POST"])
-def descargar_archivo():
-    data = request.get_json()
-    clave = data.get("clave", "")
-
-    if clave in CLAVES_VALIDAS:
-        ruta_archivo = CLAVES_VALIDAS[clave]
-        try:
-            return send_file(ruta_archivo, as_attachment=True)
-        except FileNotFoundError:
-            return jsonify({"error": "Archivo no encontrado"}), 404
-    else:
-        return jsonify({"error": "Clave inválida"}), 403
+    try:
+        procesar_excel(ruta_entrada, ruta_salida)
+        return send_file(ruta_salida, as_attachment=True)
+    except Exception as e:
+        return f"Error procesando el archivo: {str(e)}", 500
 
 if __name__ == "__main__":
     app.run(debug=True)
