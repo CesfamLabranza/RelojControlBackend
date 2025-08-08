@@ -1,5 +1,13 @@
-from io import StringIO
-import sys
+from flask import Flask, request, send_file, render_template, jsonify
+from procesador import procesar_excel
+import os
+import traceback
+
+app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return render_template("index.html")
 
 @app.route("/procesar", methods=["POST"])
 def procesar():
@@ -10,20 +18,41 @@ def procesar():
     if archivo.filename == '':
         return jsonify({"error": "Nombre de archivo vacío"}), 400
 
-    ruta_entrada = "entrada.xlsx" if archivo.filename.endswith(".xlsx") else "entrada.xls"
-    ruta_salida = "salida.xlsx"
-    archivo.save(ruta_entrada)
-
-    # Capturar logs en un buffer
-    buffer = StringIO()
-    sys.stdout = buffer
-
     try:
-        procesar_excel(ruta_entrada, ruta_salida)
-        sys.stdout = sys.__stdout__  # Restaurar salida
+        ruta_entrada = "entrada.xlsx"
+        ruta_salida = "salida.xlsx"
+        archivo.save(ruta_entrada)
+
+        log = procesar_excel(ruta_entrada, ruta_salida)
+
         return send_file(ruta_salida, as_attachment=True)
+
     except Exception as e:
-        sys.stdout = sys.__stdout__
-        log = buffer.getvalue()
-        error_msg = f"❌ Error al procesar: {str(e)}\n\n{log}"
-        return jsonify({"error": error_msg}), 500
+        error_trace = traceback.format_exc()
+        return jsonify({
+            "error": "Ocurrió un error al procesar el archivo.",
+            "detalle": str(e),
+            "traza": error_trace
+        }), 500
+
+# CLAVES PREDEFINIDAS PARA ACCESO A ARCHIVOS
+CLAVES_VALIDAS = {
+    "infolabranza": "archivos/labranza.xlsx"
+}
+
+@app.route("/descargar", methods=["POST"])
+def descargar_archivo():
+    data = request.get_json()
+    clave = data.get("clave", "")
+
+    if clave in CLAVES_VALIDAS:
+        ruta_archivo = CLAVES_VALIDAS[clave]
+        try:
+            return send_file(ruta_archivo, as_attachment=True)
+        except FileNotFoundError:
+            return jsonify({"error": "Archivo no encontrado"}), 404
+    else:
+        return jsonify({"error": "Clave inválida"}), 403
+
+if __name__ == "__main__":
+    app.run(debug=True)
