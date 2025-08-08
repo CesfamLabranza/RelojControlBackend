@@ -1,58 +1,38 @@
-from flask import Flask, request, send_file, render_template, jsonify
+from flask import Flask, request, send_file, jsonify
+from flask_cors import CORS
 from procesador import procesar_excel
-import os
-import traceback
+from io import BytesIO
 
 app = Flask(__name__)
+CORS(app)  # Permite CORS para que el frontend pueda comunicarse
 
 @app.route("/")
-def index():
-    return render_template("index.html")
+def home():
+    return "🟢 Backend Reloj Control activo"
 
 @app.route("/procesar", methods=["POST"])
-def procesar():
-    if 'archivo' not in request.files:
+def procesar_archivo():
+    if 'file' not in request.files:
         return jsonify({"error": "No se envió ningún archivo"}), 400
 
-    archivo = request.files['archivo']
-    if archivo.filename == '':
-        return jsonify({"error": "Nombre de archivo vacío"}), 400
+    file = request.files['file']
+
+    if file.filename == '':
+        return jsonify({"error": "El nombre del archivo está vacío"}), 400
+
+    if not file.filename.endswith(".xlsx"):
+        return jsonify({"error": "Solo se aceptan archivos .xlsx"}), 400
 
     try:
-        ruta_entrada = "entrada.xlsx"
-        ruta_salida = "salida.xlsx"
-        archivo.save(ruta_entrada)
-
-        log = procesar_excel(ruta_entrada, ruta_salida)
-
-        return send_file(ruta_salida, as_attachment=True)
-
+        output = procesar_excel(file.stream)
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name="resultado.xlsx"
+        )
     except Exception as e:
-        error_trace = traceback.format_exc()
-        return jsonify({
-            "error": "Ocurrió un error al procesar el archivo.",
-            "detalle": str(e),
-            "traza": error_trace
-        }), 500
-
-# CLAVES PREDEFINIDAS PARA ACCESO A ARCHIVOS
-CLAVES_VALIDAS = {
-    "infolabranza": "archivos/labranza.xlsx"
-}
-
-@app.route("/descargar", methods=["POST"])
-def descargar_archivo():
-    data = request.get_json()
-    clave = data.get("clave", "")
-
-    if clave in CLAVES_VALIDAS:
-        ruta_archivo = CLAVES_VALIDAS[clave]
-        try:
-            return send_file(ruta_archivo, as_attachment=True)
-        except FileNotFoundError:
-            return jsonify({"error": "Archivo no encontrado"}), 404
-    else:
-        return jsonify({"error": "Clave inválida"}), 403
+        return jsonify({"error": f"Error al procesar archivo: {str(e)}"}), 500
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000)
