@@ -1,11 +1,10 @@
 import pandas as pd
-from datetime import datetime, time
-from openpyxl import load_workbook
-from openpyxl.styles import PatternFill
 import re
-import os
+from datetime import datetime, time
+from openpyxl.styles import PatternFill
+from openpyxl import load_workbook
 
-# ========== CONFIGURACIÓN ==========
+# Lista de feriados Chile 2025
 FERIADOS_2025 = [
     "2025-01-01", "2025-04-18", "2025-04-19", "2025-05-01",
     "2025-05-21", "2025-06-29", "2025-07-16", "2025-08-15",
@@ -36,9 +35,9 @@ def obtener_horario_turno(turno, dia_semana):
     horas = re.findall(r"\d{1,2}:\d{2}", turno)
     if len(horas) < 2:
         return None, None
-    if dia_semana in [0, 1, 2, 3]:
+    if dia_semana in [0, 1, 2, 3]:  # Lu-Ju
         return horas[0], horas[1]
-    elif dia_semana == 4 and len(horas) >= 4:
+    elif dia_semana == 4 and len(horas) >= 4:  # Vi
         return horas[2], horas[3]
     return None, None
 
@@ -107,52 +106,45 @@ def calcular_horas_extras(entrada, salida, fecha, turno, descripcion):
     horas_25 = round(minutos_25 / 60, 2) if minutos_25 > 30 else 0
     return horas_50, horas_25
 
-# =========================================
-# FUNCIÓN PRINCIPAL PARA RENDER
-# =========================================
 def procesar_excel(entrada, salida):
-    import xlrd  # Asegúrate de incluir esto en requirements.txt
-    from openpyxl import Workbook
-
-    wb = xlrd.open_workbook(entrada)
-    sheet = wb.sheet_by_index(0)
+    df_raw = pd.read_excel(entrada, engine="xlrd")  # Lee .xls
 
     data_detalle = []
     data_resumen = {}
     funcionario = rut = organigrama = turno = periodo = ""
 
-    fila = 0
-    while fila < sheet.nrows:
-        celda = str(sheet.cell_value(fila, 0)).strip().lower()
+    i = 0
+    while i < len(df_raw):
+        celda = str(df_raw.iloc[i, 0]).strip().lower()
         if celda.startswith("funcionario"):
-            funcionario = str(sheet.cell_value(fila, 1)).strip(": ")
-            rut = str(sheet.cell_value(fila + 1, 1)).strip(": ")
-            organigrama = str(sheet.cell_value(fila + 2, 1)).strip(": ")
-            turno = str(sheet.cell_value(fila + 3, 1)).strip(": ")
-            periodo = str(sheet.cell_value(fila + 4, 1)).strip(": ")
-            fila += 6
+            funcionario = str(df_raw.iloc[i, 1]).strip(": ")
+            rut = str(df_raw.iloc[i + 1, 1]).strip(": ")
+            organigrama = str(df_raw.iloc[i + 2, 1]).strip(": ")
+            turno = str(df_raw.iloc[i + 3, 1]).strip(": ")
+            periodo = str(df_raw.iloc[i + 4, 1]).strip(": ")
+            i += 6
             continue
 
         if celda == "dia":
-            fila += 1
-            while fila < sheet.nrows and sheet.cell_value(fila, 0):
-                dia_text = str(sheet.cell_value(fila, 0)).strip().lower()
-                if dia_text == "totales" or dia_text == "none":
-                    fila += 1
-                    continue
-                if dia_text.startswith("funcionario"):
+            i += 1
+            while i < len(df_raw) and str(df_raw.iloc[i, 0]).strip():
+                dia_text = str(df_raw.iloc[i, 0]).strip().lower()
+                if dia_text == "totales" or dia_text.startswith("funcionario"):
                     break
 
-                fecha = sheet.cell_value(fila, 1)
-                entrada_val = sheet.cell_value(fila, 2)
-                salida_val = sheet.cell_value(fila, 3)
-                descripcion = str(sheet.cell_value(fila, 5)).strip()
+                fecha = df_raw.iloc[i, 1]
+                entrada_val = df_raw.iloc[i, 2]
+                salida_val = df_raw.iloc[i, 3]
+                descripcion = str(df_raw.iloc[i, 5])
 
                 atraso = calcular_atraso(entrada_val, fecha, turno)
                 h50, h25 = calcular_horas_extras(entrada_val, salida_val, fecha, turno, descripcion)
 
-                data_detalle.append([funcionario, rut, organigrama, turno, periodo, fecha, entrada_val, salida_val,
-                                     minutos_a_hhmm(atraso), convertir_a_hhmm(h50), convertir_a_hhmm(h25), descripcion])
+                data_detalle.append([
+                    funcionario, rut, organigrama, turno, periodo,
+                    fecha, entrada_val, salida_val,
+                    minutos_a_hhmm(atraso), convertir_a_hhmm(h50), convertir_a_hhmm(h25), descripcion
+                ])
 
                 if funcionario not in data_resumen:
                     data_resumen[funcionario] = {"Rut": rut, "Organigrama": organigrama, "Turno": turno, "Periodo": periodo,
@@ -160,10 +152,9 @@ def procesar_excel(entrada, salida):
                 data_resumen[funcionario]["Total 50%"] += h50
                 data_resumen[funcionario]["Total 25%"] += h25
                 data_resumen[funcionario]["Total Atraso"] += atraso
-
-                fila += 1
+                i += 1
         else:
-            fila += 1
+            i += 1
 
     df_detalle = pd.DataFrame(data_detalle, columns=[
         "Funcionario", "Rut", "Organigrama", "Turno", "Periodo",
@@ -171,14 +162,36 @@ def procesar_excel(entrada, salida):
     ])
 
     df_resumen = pd.DataFrame([
-        [f, data_resumen[f]["Rut"], data_resumen[f]["Organigrama"], data_resumen[f]["Turno"], data_resumen[f]["Periodo"],
-         convertir_a_hhmm(data_resumen[f]["Total 50%"]),
-         convertir_a_hhmm(data_resumen[f]["Total 25%"]),
-         minutos_a_hhmm(data_resumen[f]["Total Atraso"]),
-         convertir_a_hhmm(data_resumen[f]["Total 50%"] + data_resumen[f]["Total 25%"])]
+        [
+            f, data_resumen[f]["Rut"], data_resumen[f]["Organigrama"], data_resumen[f]["Turno"], data_resumen[f]["Periodo"],
+            convertir_a_hhmm(data_resumen[f]["Total 50%"]),
+            convertir_a_hhmm(data_resumen[f]["Total 25%"]),
+            minutos_a_hhmm(data_resumen[f]["Total Atraso"]),
+            convertir_a_hhmm(data_resumen[f]["Total 50%"] + data_resumen[f]["Total 25%"])
+        ]
         for f in data_resumen
     ], columns=["Funcionario", "Rut", "Organigrama", "Turno", "Periodo", "Total 50%", "Total 25%", "Total Atraso", "Total Horas"])
 
     with pd.ExcelWriter(salida, engine="openpyxl") as writer:
         df_detalle.to_excel(writer, sheet_name="Detalle Diario", index=False)
         df_resumen.to_excel(writer, sheet_name="Resumen", index=False)
+
+    # Aplicar colores
+    wb = load_workbook(salida)
+    ws = wb["Detalle Diario"]
+    fill_rojo = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    fill_amarillo = PatternFill(start_color="FFFACD", end_color="FFFACD", fill_type="solid")
+
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=12):
+        descripcion = str(row[11].value).strip().lower()
+        entrada = str(row[6].value).strip()
+        salida = str(row[7].value).strip()
+
+        if "ausente" in descripcion:
+            for cell in row:
+                cell.fill = fill_rojo
+        elif "falta entrada" in descripcion or "falta salida" in descripcion or entrada == "-" or salida == "-":
+            for cell in row:
+                cell.fill = fill_amarillo
+
+    wb.save(salida)
