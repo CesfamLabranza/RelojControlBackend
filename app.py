@@ -17,17 +17,17 @@ def procesar():
     if archivo.filename == '':
         return "Nombre de archivo vacío", 400
 
-    ruta_entrada = "entrada.xlsx"
+    ruta_entrada = "entrada.xls"
     ruta_salida = "salida.xlsx"
     archivo.save(ruta_entrada)
 
     procesar_excel(ruta_entrada, ruta_salida)
     return send_file(ruta_salida, as_attachment=True)
 
-# Claves y archivos permitidos
+# (Esta parte no se usa actualmente pero se puede activar después)
 CLAVES_VALIDAS = {
     "infolabranza": "archivos/labranza.xlsx",
-    # Puedes agregar más claves y rutas aquí
+    # Agrega más claves si deseas habilitar descargas
 }
 
 @app.route("/descargar", methods=["POST"])
