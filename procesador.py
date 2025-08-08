@@ -4,6 +4,7 @@ from datetime import datetime, time
 from openpyxl.styles import PatternFill
 from openpyxl import load_workbook
 
+# Lista de feriados Chile 2025
 FERIADOS_2025 = [
     "2025-01-01", "2025-04-18", "2025-04-19", "2025-05-01",
     "2025-05-21", "2025-06-29", "2025-07-16", "2025-08-15",
@@ -106,7 +107,7 @@ def calcular_horas_extras(entrada, salida, fecha, turno, descripcion):
     return horas_50, horas_25
 
 def procesar_excel(entrada, salida):
-    df_raw = pd.read_excel(entrada, engine="xlrd")  # Para archivos .xls
+    df_raw = pd.read_excel(entrada, engine="xlrd")
 
     data_detalle = []
     data_resumen = {}
@@ -175,7 +176,7 @@ def procesar_excel(entrada, salida):
         df_detalle.to_excel(writer, sheet_name="Detalle Diario", index=False)
         df_resumen.to_excel(writer, sheet_name="Resumen", index=False)
 
-    # Colorear celas
+    # Aplicar colores
     wb = load_workbook(salida)
     ws = wb["Detalle Diario"]
     fill_rojo = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
