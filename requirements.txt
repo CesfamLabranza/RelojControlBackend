@@ -4,3 +4,4 @@ openpyxl
 gunicorn
 pyexcel
 pyexcel-xls
+xlrd==2.0.1
