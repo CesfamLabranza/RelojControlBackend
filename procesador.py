@@ -1,545 +1,516 @@
+# procesador.py
+# -*- coding: utf-8 -*-
+
 import re
 from io import BytesIO
 from datetime import datetime, time
 
 import pandas as pd
+from bs4 import BeautifulSoup
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 
-# xlrd es opcional, pero da soporte a .xls binario real
-try:
-    import xlrd
-    HAS_XLRD = True
-except Exception:
-    HAS_XLRD = False
-
-# =================== FERIADOS (si aplica a reglas futuras) ===================
-FERIADOS_2025 = [
-    "2025-01-01", "2025-04-18", "2025-04-19", "2025-05-01",
-    "2025-05-21", "2025-06-29", "2025-07-16", "2025-08-15",
-    "2025-09-18", "2025-09-19", "2025-10-12", "2025-10-31",
-    "2025-11-01", "2025-12-08", "2025-12-25"
-]
-FERIADOS_2025 = [datetime.strptime(d, "%Y-%m-%d").date() for d in FERIADOS_2025]
-
-# =================== AUXILIARES GENERALES ===================
+# ==========================
+# Utilidades de fecha/tiempo
+# ==========================
 
 def normalizar_fecha(fecha):
-    """Convierte 'dd-mm-aaaa' o 'dd/mm/aaaa' o datetime a date."""
+    """Convierte a date soportando dd-mm-YYYY, dd/mm/YYYY o datetime."""
     if isinstance(fecha, datetime):
         return fecha.date()
     try:
         s = str(fecha).strip()
+        if not s or s.lower() == "none":
+            return None
         if "-" in s:
+            # Formato dd-mm-YYYY
             return datetime.strptime(s, "%d-%m-%Y").date()
         if "/" in s:
+            # Formato dd/mm/YYYY
             return datetime.strptime(s, "%d/%m/%Y").date()
     except Exception:
         return None
     return None
 
-def normalizar_fecha_xls(valor, datemode):
-    """
-    Convierte un valor de fecha proveniente de hoja .xls (xlrd):
-    - numérico Excel -> date
-    - 'dd-mm-aaaa' o 'dd/mm/aaaa' -> date
-    - datetime -> date
-    """
-    if isinstance(valor, datetime):
-        return valor.date()
-
-    # numérico Excel
-    if isinstance(valor, (int, float)) and HAS_XLRD:
-        try:
-            return xlrd.xldate_as_datetime(valor, datemode).date()
-        except Exception:
-            pass
-
-    # string
-    try:
-        s = str(valor).strip()
-        if "-" in s:
-            return datetime.strptime(s, "%d-%m-%Y").date()
-        if "/" in s:
-            return datetime.strptime(s, "%d/%m/%Y").date()
-    except Exception:
-        return None
-
-    return None
-
-def minutos_a_hhmm(minutos):
-    return f"{int(minutos) // 60:02}:{int(minutos) % 60:02}"
 
 def convertir_a_hhmm(horas):
-    minutos = int(round(float(horas) * 60))
-    return minutos_a_hhmm(minutos)
+    """Convierte horas (float) a HH:MM, redondeando a minutos."""
+    minutos = int(round(horas * 60))
+    return f"{minutos // 60:02d}:{minutos % 60:02d}"
+
+
+def minutos_a_hhmm(minutos):
+    """Convierte minutos (int) a HH:MM."""
+    return f"{minutos // 60:02d}:{minutos % 60:02d}"
+
 
 def obtener_horario_turno(turno, dia_semana):
     """
-    Extrae horas del string de turno. Ejemplos:
-    'Lu-Ju 08:00-17:00; Vi 08:00-16:00' o cualquier texto que contenga hh:mm.
-    Para Lu-Ju (0..3) usa el primer par, para Viernes (4) el segundo si existe.
+    Extrae las horas desde el texto de turno.
+    Espera patrón tipo 'HH:MM' repetido. Para Vi (4) permite otros dos.
     """
-    horas = re.findall(r"\d{1,2}:\d{2}", turno or "")
+    horas = re.findall(r"\d{1,2}:\d{2}", str(turno))
     if len(horas) < 2:
         return None, None
-    # Lu-Ju
-    if dia_semana in [0, 1, 2, 3]:
+
+    if dia_semana in (0, 1, 2, 3):  # Lu-Ju
         return horas[0], horas[1]
-    # Viernes
-    if dia_semana == 4 and len(horas) >= 4:
+    if dia_semana == 4 and len(horas) >= 4:  # Vi
         return horas[2], horas[3]
     return None, None
 
+
 def calcular_atraso(entrada, fecha, turno):
-    """
-    entrada: 'HH:MM:SS' o '-' ; fecha: 'dd-mm-aaaa' o datetime/date
-    turno: string con horarios.
-    """
-    if not entrada or entrada == "-":
+    """Minutos de atraso respecto al turno del día."""
+    if not entrada or str(entrada).strip() in ("-", "", "None"):
         return 0
-    f = normalizar_fecha(fecha)
-    if not f:
+
+    fecha_dt = normalizar_fecha(fecha)
+    if not fecha_dt:
         return 0
+
     try:
-        ent_t = datetime.strptime(str(entrada), "%H:%M:%S").time()
+        entrada_dt = datetime.strptime(str(entrada), "%H:%M:%S").time()
     except Exception:
+        # A veces viene 'HH:MM'
+        try:
+            entrada_dt = datetime.strptime(str(entrada), "%H:%M").time()
+        except Exception:
+            return 0
+
+    dia_semana = fecha_dt.weekday()
+    inicio_str, _ = obtener_horario_turno(turno, dia_semana)
+    if not inicio_str:
         return 0
-    dia = f.weekday()
-    ini_str, _ = obtener_horario_turno(turno, dia)
-    if not ini_str:
-        return 0
-    hora_inicio = datetime.strptime(ini_str, "%H:%M").time()
-    if ent_t > hora_inicio:
-        return int((datetime.combine(f, ent_t) - datetime.combine(f, hora_inicio)).total_seconds() / 60)
+
+    hora_inicio = datetime.strptime(inicio_str, "%H:%M").time()
+    if entrada_dt > hora_inicio:
+        atraso_min = (
+            datetime.combine(fecha_dt, entrada_dt)
+            - datetime.combine(fecha_dt, hora_inicio)
+        ).total_seconds() / 60.0
+        return int(atraso_min)
+
     return 0
 
+
 def calcular_horas_extras(entrada, salida, fecha, turno, descripcion):
-    """
-    Devuelve (horas_50, horas_25) como floats según reglas:
-    - Antes de la jornada: <07:00 -> 50%, >=07:00 hasta inicio -> 25%
-    - Después de la jornada: hasta 21:00 -> 25%, posterior -> 50%
-    - Se descartan bloques <= 30 min.
-    """
-    if not entrada or not salida or entrada == "-" or salida == "-":
-        return 0, 0
-    if str(descripcion or "").lower() in ("ausente",) or "libre" in str(descripcion or "").lower():
+    """Retorna (horas_50, horas_25). Reglas básicas + límites 21:00 y 07:00."""
+    if (
+        not entrada
+        or not salida
+        or str(entrada).strip() in ("-", "", "None")
+        or str(salida).strip() in ("-", "", "None")
+    ):
         return 0, 0
 
-    f = normalizar_fecha(fecha)
-    if not f:
+    desc = str(descripcion or "").lower()
+    if "ausente" in desc or "libre" in desc:
         return 0, 0
-    try:
-        e_dt = datetime.strptime(str(entrada), "%H:%M:%S")
-        s_dt = datetime.strptime(str(salida), "%H:%M:%S")
-    except Exception:
+
+    fecha_dt = normalizar_fecha(fecha)
+    if not fecha_dt:
         return 0, 0
-    if s_dt < e_dt:
-        s_dt += pd.Timedelta(days=1)
 
-    dia = f.weekday()
-    ini_str, fin_str = obtener_horario_turno(turno, dia)
-    if not ini_str or not fin_str:
-        total_min = (s_dt - e_dt).total_seconds() / 60
-        return (total_min / 60, 0) if total_min > 30 else (0, 0)
+    # Parseo de horas
+    fmt_ok = None
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            entrada_dt = datetime.strptime(str(entrada), fmt)
+            salida_dt = datetime.strptime(str(salida), fmt)
+            fmt_ok = True
+            break
+        except Exception:
+            pass
+    if not fmt_ok:
+        return 0, 0
 
-    h_ini = datetime.combine(f, datetime.strptime(ini_str, "%H:%M").time())
-    h_fin = datetime.combine(f, datetime.strptime(fin_str, "%H:%M").time())
+    # Salidas después de medianoche
+    if salida_dt < entrada_dt:
+        salida_dt += pd.Timedelta(days=1)
 
-    min50 = 0
-    min25 = 0
+    dia_semana = fecha_dt.weekday()
+    inicio_str, fin_str = obtener_horario_turno(turno, dia_semana)
 
-    if e_dt < h_ini:
-        if e_dt.time() < time(7, 0):
-            min50 += (min(s_dt, h_ini) - e_dt).total_seconds() / 60
+    # Sin turno definido → si el bloque es > 30 min, todo como 25%
+    if not inicio_str or not fin_str:
+        total_min = (salida_dt - entrada_dt).total_seconds() / 60.0
+        return (total_min / 60.0, 0) if total_min > 30 else (0, 0)
+
+    hora_inicio = datetime.combine(fecha_dt, datetime.strptime(inicio_str, "%H:%M").time())
+    hora_fin = datetime.combine(fecha_dt, datetime.strptime(fin_str, "%H:%M").time())
+
+    minutos_50 = 0.0
+    minutos_25 = 0.0
+
+    # Antes del inicio
+    if entrada_dt < hora_inicio:
+        # Antes de 07:00 es 50%, de 07:00 a inicio es 25%
+        limite_7 = datetime.combine(fecha_dt, time(7, 0))
+        if entrada_dt < limite_7:
+            minutos_50 += (min(salida_dt, hora_inicio) - entrada_dt).total_seconds() / 60.0
         else:
-            min25 += (min(s_dt, h_ini) - e_dt).total_seconds() / 60
+            minutos_25 += (min(salida_dt, hora_inicio) - entrada_dt).total_seconds() / 60.0
 
-    if s_dt > h_fin:
-        if s_dt > datetime.combine(f, time(21, 0)):
-            min25 += max(0, (datetime.combine(f, time(21, 0)) - h_fin).total_seconds() / 60)
-            min50 += (s_dt - datetime.combine(f, time(21, 0))).total_seconds() / 60
+    # Después del fin
+    if salida_dt > hora_fin:
+        limite_21 = datetime.combine(fecha_dt, time(21, 0))
+        if salida_dt > limite_21:
+            minutos_25 += max(0.0, (limite_21 - hora_fin).total_seconds() / 60.0)
+            minutos_50 += (salida_dt - limite_21).total_seconds() / 60.0
         else:
-            min25 += (s_dt - h_fin).total_seconds() / 60
+            minutos_25 += (salida_dt - hora_fin).total_seconds() / 60.0
 
-    h50 = round(min50 / 60, 2) if min50 > 30 else 0
-    h25 = round(min25 / 60, 2) if min25 > 30 else 0
-    return h50, h25
+    horas_50 = round(minutos_50 / 60.0, 2) if minutos_50 > 30 else 0
+    horas_25 = round(minutos_25 / 60.0, 2) if minutos_25 > 30 else 0
+    return horas_50, horas_25
 
-# =================== EXPORTAR RESULTADOS ===================
 
-def armar_resultados(registros, meta):
+# ====================================
+# Lectura y normalización desde HTML
+# ====================================
+
+def _decode_bytes(b):
+    """Intenta decodificar HTML con varios encodings comunes."""
+    for enc in ("utf-8", "latin-1", "cp1252"):
+        try:
+            return b.decode(enc)
+        except Exception:
+            pass
+    # Último recurso: errores 'replace'
+    return b.decode("utf-8", errors="replace")
+
+
+def _es_html(bytes_head: bytes) -> bool:
+    """Heurística rápida: ¿empieza como HTML?"""
+    h = bytes_head.lstrip().lower()
+    return h.startswith(b"<!doctype html") or h.startswith(b"<html") or b"<table" in h[:400]
+
+
+def _extraer_meta_html(soup: BeautifulSoup):
     """
-    registros: lista de dicts con llaves:
-      Fecha (str 'dd-mm-aaaa' preferente), Entrada "HH:MM:SS", Salida "HH:MM:SS", Descripcion (str)
-    meta: dict con Funcionario, Rut, Organigrama, Turno, Periodo
+    Busca cabeceras tipo:
+      Funcionario : X
+      N° Rut : Y
+      Unidad/Organigrama : Z
+      Tipo de Turno : T
+      Periodo : P
+    en celdas/filas iniciales.
     """
-    detalle = []
-    resumen = {}
+    meta = {"Funcionario": "", "Rut": "", "Organigrama": "", "Turno": "", "Periodo": ""}
 
-    for r in registros:
-        fecha = r.get("Fecha")
-        entrada = r.get("Entrada")
-        salida = r.get("Salida")
-        descr = r.get("Descripcion", "")
+    # Texto global rápido
+    texto = soup.get_text(" ").strip()
+    patrones = {
+        "Funcionario": r"Funcionario\s*:?\s*(.+?)\s{2,}",
+        "Rut": r"Rut\s*:?\s*([^\s]+)",
+        "Organigrama": r"(Organigrama|Unidad|Unidad/Organigrama)\s*:?\s*(.+?)\s{2,}",
+        "Turno": r"(Tipo\s*de\s*Turno|Turno)\s*:?\s*(.+?)\s{2,}",
+        "Periodo": r"Periodo\s*:?\s*(.+?)\s{2,}",
+    }
+    for k, pat in patrones.items():
+        m = re.search(pat, texto, flags=re.IGNORECASE)
+        if m:
+            meta[k] = m.group(m.lastindex or 1).strip(" :")
 
-        atraso_min = calcular_atraso(entrada, fecha, meta.get("Turno"))
-        h50, h25 = calcular_horas_extras(entrada, salida, fecha, meta.get("Turno"), descr)
+    # Si todavía falta algo, recorremos filas (tr/td) arriba
+    if not meta["Funcionario"] or not meta["Periodo"]:
+        for tr in soup.find_all("tr")[:30]:
+            celdas = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
+            if len(celdas) >= 2:
+                key = celdas[0].lower()
+                val = celdas[1]
+                if "funcionario" in key and not meta["Funcionario"]:
+                    meta["Funcionario"] = val
+                elif "rut" in key and not meta["Rut"]:
+                    meta["Rut"] = val
+                elif ("organigrama" in key or "unidad" in key) and not meta["Organigrama"]:
+                    meta["Organigrama"] = val
+                elif "turno" in key and not meta["Turno"]:
+                    meta["Turno"] = val
+                elif "periodo" in key and not meta["Periodo"]:
+                    meta["Periodo"] = val
 
-        detalle.append([
-            meta.get("Funcionario", ""),
-            meta.get("Rut", ""),
-            meta.get("Organigrama", ""),
-            meta.get("Turno", ""),
-            meta.get("Periodo", ""),
+    return meta
+
+
+def _leer_tablas_html(bhtml: bytes):
+    """Devuelve lista de DataFrames de tablas HTML (usa pandas.read_html)."""
+    # pandas necesita string, probamos varios encodings
+    html_txt = _decode_bytes(bhtml)
+    # parse con bs4/lxml para limpiar
+    soup = BeautifulSoup(html_txt, "lxml")
+    # pandas read_html sobre el string limpio
+    df_list = pd.read_html(str(soup), flavor="lxml")
+    return soup, df_list
+
+
+def _procesar_detalle_desde_tabla(df, meta, data_detalle, data_resumen):
+    """
+    Recibe un DF tipo detalle y acumula en data_detalle/data_resumen.
+    Se buscan columnas por nombres aproximados.
+    """
+    # Normalizar nombres
+    cols = {c: str(c).strip().lower() for c in df.columns}
+    inv = {v: k for k, v in cols.items()}
+
+    # Mapeos heurísticos
+    col_dia = inv.get("dia")
+    col_fecha = inv.get("fecha")
+    col_entrada = inv.get("entrada")
+    col_salida = inv.get("salida")
+    col_desc = None
+    for label in ("descripción", "descripcion", "obs", "observación", "observacion"):
+        if inv.get(label):
+            col_desc = inv[label]
+            break
+
+    if not (col_fecha and col_entrada and col_salida):
+        # No parece detalle
+        return
+
+    for _, row in df.iterrows():
+        dia_text = str(row[col_dia]) if col_dia else ""
+        if str(dia_text).strip().lower() in ("totales", "none"):
+            continue
+
+        fecha = row[col_fecha]
+        entrada = row[col_entrada]
+        salida  = row[col_salida]
+        desc    = row[col_desc] if col_desc else ""
+
+        atraso_min = calcular_atraso(entrada, fecha, meta.get("Turno", ""))
+        h50, h25   = calcular_horas_extras(entrada, salida, fecha, meta.get("Turno", ""), desc)
+
+        data_detalle.append([
+            meta.get("Funcionario",""),
+            meta.get("Rut",""),
+            meta.get("Organigrama",""),
+            meta.get("Turno",""),
+            meta.get("Periodo",""),
             fecha, entrada, salida,
             minutos_a_hhmm(atraso_min),
             convertir_a_hhmm(h50),
             convertir_a_hhmm(h25),
-            descr
+            desc,
         ])
 
-        f = meta.get("Funcionario", "")
-        if f not in resumen:
-            resumen[f] = {
-                "Rut": meta.get("Rut", ""),
-                "Organigrama": meta.get("Organigrama", ""),
-                "Turno": meta.get("Turno", ""),
-                "Periodo": meta.get("Periodo", ""),
-                "Total 50%": 0, "Total 25%": 0, "Total Atraso": 0
+        f = meta.get("Funcionario","")
+        if f not in data_resumen:
+            data_resumen[f] = {
+                "Rut": meta.get("Rut",""),
+                "Organigrama": meta.get("Organigrama",""),
+                "Turno": meta.get("Turno",""),
+                "Periodo": meta.get("Periodo",""),
+                "Total 50%": 0.0,
+                "Total 25%": 0.0,
+                "Total Atraso": 0,
             }
-        resumen[f]["Total 50%"] += h50
-        resumen[f]["Total 25%"] += h25
-        resumen[f]["Total Atraso"] += atraso_min
+        data_resumen[f]["Total 50%"] += h50
+        data_resumen[f]["Total 25%"] += h25
+        data_resumen[f]["Total Atraso"] += atraso_min
 
-    df_detalle = pd.DataFrame(detalle, columns=[
+
+def _procesar_html(bytes_file: bytes) -> BytesIO:
+    """
+    Procesa el HTML exportado como .xls del Reloj Control.
+    Retorna BytesIO con un .xlsx que contiene:
+      - 'Detalle Diario'
+      - 'Resumen'
+    """
+    soup, tablas = _leer_tablas_html(bytes_file)
+    meta = _extraer_meta_html(soup)
+
+    data_detalle = []
+    data_resumen = {}
+
+    # Heurística: la tabla con columnas 'Fecha / Entrada / Salida' es el detalle.
+    for df in tablas:
+        _procesar_detalle_desde_tabla(df, meta, data_detalle, data_resumen)
+
+    # Construcción de DataFrames finales
+    df_detalle = pd.DataFrame(data_detalle, columns=[
         "Funcionario", "Rut", "Organigrama", "Turno", "Periodo",
         "Fecha", "Entrada", "Salida", "Atraso (hh:mm)", "50%", "25%", "Descripción"
     ])
 
     df_resumen = pd.DataFrame([
         [
-            f, r["Rut"], r["Organigrama"], r["Turno"], r["Periodo"],
-            convertir_a_hhmm(r["Total 50%"]),
-            convertir_a_hhmm(r["Total 25%"]),
-            minutos_a_hhmm(r["Total Atraso"]),
-            convertir_a_hhmm(r["Total 50%"] + r["Total 25%"])
+            f,
+            data_resumen[f]["Rut"],
+            data_resumen[f]["Organigrama"],
+            data_resumen[f]["Turno"],
+            data_resumen[f]["Periodo"],
+            convertir_a_hhmm(data_resumen[f]["Total 50%"]),
+            convertir_a_hhmm(data_resumen[f]["Total 25%"]),
+            minutos_a_hhmm(data_resumen[f]["Total Atraso"]),
+            convertir_a_hhmm(data_resumen[f]["Total 50%"] + data_resumen[f]["Total 25%"]),
         ]
-        for f, r in resumen.items()
-    ], columns=["Funcionario", "Rut", "Organigrama", "Turno", "Periodo",
-                "Total 50%", "Total 25%", "Total Atraso", "Total Horas"])
+        for f in data_resumen
+    ], columns=[
+        "Funcionario", "Rut", "Organigrama", "Turno", "Periodo",
+        "Total 50%", "Total 25%", "Total Atraso", "Total Horas"
+    ])
 
-    # Exportar + colores
-    out = BytesIO()
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+    # Salida a Excel con colores
+    return _emitir_excel_coloreado(df_detalle, df_resumen)
+
+
+# =============================
+# Lectura “real” con openpyxl
+# =============================
+
+def _leer_xlsx_con_openpyxl(file_stream) -> BytesIO:
+    """Parser para verdaderos XLSX (no HTML). Mantiene compatibilidad con la lógica previa."""
+    wb = load_workbook(filename=file_stream)
+    sh = wb.active
+
+    data_detalle = []
+    data_resumen = {}
+
+    fila = 1
+    max_row = sh.max_row
+    meta = {"Funcionario": "", "Rut": "", "Organigrama": "", "Turno": "", "Periodo": ""}
+
+    while fila <= max_row:
+        celda = str(sh.cell(row=fila, column=1).value).strip().lower()
+
+        if celda.startswith("funcionario"):
+            meta["Funcionario"]  = str(sh.cell(row=fila + 0, column=2).value or "").strip(": ")
+            meta["Rut"]          = str(sh.cell(row=fila + 1, column=2).value or "").strip(": ")
+            meta["Organigrama"]  = str(sh.cell(row=fila + 2, column=2).value or "").strip(": ")
+            meta["Turno"]        = str(sh.cell(row=fila + 3, column=2).value or "").strip(": ")
+            # >>>> LÍNEA CORREGIDA (antes tenía un tab entre row y fila) <<<<
+            meta["Periodo"]      = str(sh.cell(row=fila + 4, column=2).value or "").strip(": ")
+            fila += 6
+            continue
+
+        if celda == "dia":
+            fila += 1
+            while fila <= max_row and sh.cell(row=fila, column=1).value:
+                dia_text = str(sh.cell(row=fila, column=1).value).strip().lower()
+                if dia_text == "totales":
+                    fila += 1
+                    continue
+                if dia_text.startswith("funcionario") or dia_text == "none":
+                    break
+
+                fecha      = sh.cell(row=fila, column=2).value
+                entrada    = sh.cell(row=fila, column=3).value
+                salida     = sh.cell(row=fila, column=4).value
+                descripcion= str(sh.cell(row=fila, column=6).value or "").strip()
+
+                atraso_min = calcular_atraso(entrada, fecha, meta["Turno"])
+                h50, h25   = calcular_horas_extras(entrada, salida, fecha, meta["Turno"], descripcion)
+
+                data_detalle.append([
+                    meta["Funcionario"], meta["Rut"], meta["Organigrama"], meta["Turno"], meta["Periodo"],
+                    fecha, entrada, salida, minutos_a_hhmm(atraso_min),
+                    convertir_a_hhmm(h50), convertir_a_hhmm(h25), descripcion
+                ])
+
+                f = meta["Funcionario"]
+                if f not in data_resumen:
+                    data_resumen[f] = {
+                        "Rut": meta["Rut"], "Organigrama": meta["Organigrama"], "Turno": meta["Turno"], "Periodo": meta["Periodo"],
+                        "Total 50%": 0.0, "Total 25%": 0.0, "Total Atraso": 0
+                    }
+                data_resumen[f]["Total 50%"] += h50
+                data_resumen[f]["Total 25%"] += h25
+                data_resumen[f]["Total Atraso"] += atraso_min
+                fila += 1
+        else:
+            fila += 1
+
+    df_detalle = pd.DataFrame(data_detalle, columns=[
+        "Funcionario", "Rut", "Organigrama", "Turno", "Periodo",
+        "Fecha", "Entrada", "Salida", "Atraso (hh:mm)", "50%", "25%", "Descripción"
+    ])
+
+    df_resumen = pd.DataFrame([
+        [
+            f,
+            data_resumen[f]["Rut"],
+            data_resumen[f]["Organigrama"],
+            data_resumen[f]["Turno"],
+            data_resumen[f]["Periodo"],
+            convertir_a_hhmm(data_resumen[f]["Total 50%"]),
+            convertir_a_hhmm(data_resumen[f]["Total 25%"]),
+            minutos_a_hhmm(data_resumen[f]["Total Atraso"]),
+            convertir_a_hhmm(data_resumen[f]["Total 50%"] + data_resumen[f]["Total 25%"]),
+        ]
+        for f in data_resumen
+    ], columns=[
+        "Funcionario", "Rut", "Organigrama", "Turno", "Periodo",
+        "Total 50%", "Total 25%", "Total Atraso", "Total Horas"
+    ])
+
+    return _emitir_excel_coloreado(df_detalle, df_resumen)
+
+
+# ===========================
+# Emisión Excel + coloreado
+# ===========================
+
+def _emitir_excel_coloreado(df_detalle: pd.DataFrame, df_resumen: pd.DataFrame) -> BytesIO:
+    """Escribe ambos DF a un .xlsx y colorea celdas según reglas."""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df_detalle.to_excel(writer, sheet_name="Detalle Diario", index=False)
         df_resumen.to_excel(writer, sheet_name="Resumen", index=False)
-    out.seek(0)
 
-    wb = load_workbook(out)
-    ws = wb["Detalle Diario"]
-    fill_rojo = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")      # Ausente
-    fill_amarillo = PatternFill(start_color="FFFACD", end_color="FFFACD", fill_type="solid")  # Falta entrada/salida o '-'
+    # Coloreado
+    output.seek(0)
+    wb_final = load_workbook(output)
+    ws = wb_final["Detalle Diario"]
+
+    fill_rojo     = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")  # Ausente
+    fill_amarillo = PatternFill(start_color="FFFACD", end_color="FFFACD", fill_type="solid")  # Faltas
 
     for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=12):
         descripcion = str(row[11].value or "")
-        entrada = str(row[6].value or "").strip()
-        salida  = str(row[7].value or "").strip()
+        entrada     = str(row[6].value or "").strip()
+        salida      = str(row[7].value or "").strip()
+
         if "Ausente" in descripcion:
-            for c in row:
-                c.fill = fill_rojo
-        elif "Falta Entrada" in descripcion or "Falta Salida" in descripcion or entrada == "-" or salida == "-":
-            for c in row:
-                c.fill = fill_amarillo
+            for cell in row:
+                cell.fill = fill_rojo
+        elif "Falta Entrada" in descripcion or "Falta Salida" in descripcion or entrada in ("", "-") or salida in ("", "-"):
+            for cell in row:
+                cell.fill = fill_amarillo
 
-    final = BytesIO()
-    wb.save(final)
-    final.seek(0)
-    return final
+    final_output = BytesIO()
+    wb_final.save(final_output)
+    final_output.seek(0)
+    return final_output
 
-# =================== SOPORTE EXCEL REAL (.xlsx y .xls) ===================
 
-def procesar_excel(file_stream: BytesIO) -> BytesIO:
+# ===========================
+# APIs que usa app.py
+# ===========================
+
+def detectar_html_y_procesar(file_stream) -> BytesIO:
     """
-    Intenta procesar como:
-      1) .xlsx / .xlsm con openpyxl
-      2) .xls binario 97-2003 con xlrd (si disponible)
-    Si no detecta layout esperado, levanta excepción para que app.py informe.
+    Para compatibilidad: detecta si es HTML (.xls falso) y procesa;
+    si no, intenta como XLSX real.
     """
+    # Leemos bytes sin consumir el stream original (Render/Flask guarda en memoria)
     data = file_stream.read()
-    # --------- Intento 1: .xlsx (openpyxl) ----------
+    # Volvemos a posicionar por si alguien reusa el stream
     try:
-        wb = load_workbook(filename=BytesIO(data), data_only=True)
-        sh = wb.active
-
-        registros = []
-        meta = {"Funcionario": "", "Rut": "", "Organigrama": "", "Turno": "", "Periodo": ""}
-
-        fila = 1
-        max_row = sh.max_row
-        while fila <= max_row:
-            celda = str(sh.cell(row=fila, column=1).value or "").strip().lower()
-            if celda.startswith("funcionario"):
-                meta["Funcionario"] = str(sh.cell(row=fila, column=2).value or "").strip(": ")
-                meta["Rut"] = str(sh.cell(row=fila + 1, column=2).value or "").strip(": ")
-                meta["Organigrama"] = str(sh.cell(row=fila + 2, column=2).value or "").strip(": ")
-                meta["Turno"] = str(sh.cell(row=fila + 3, column=2).value or "").strip(": ")
-                meta["Periodo"] = str(sh.cell(row=fila + 4, column=2).value or "").strip(": ")
-                fila += 6
-                continue
-
-            if celda == "dia":
-                fila += 1
-                while fila <= max_row and sh.cell(row=fila, column=1).value:
-                    dtext = str(sh.cell(row=fila, column=1).value or "").strip().lower()
-                    if dtext == "totales":
-                        fila += 1
-                        continue
-                    if dtext.startswith("funcionario") or dtext == "none":
-                        break
-
-                    fecha = sh.cell(row=fila, column=2).value
-                    entrada = sh.cell(row=fila, column=3).value
-                    salida = sh.cell(row=fila, column=4).value
-                    descr = str(sh.cell(row=fila, column=6).value or "").strip()
-
-                    # Normalizar a strings esperadas
-                    fecha_str = ""
-                    try:
-                        f = pd.to_datetime(fecha, dayfirst=True, errors="coerce")
-                        if pd.notna(f):
-                            fecha_str = f.strftime("%d-%m-%Y")
-                    except Exception:
-                        pass
-                    entrada_str = _to_hms(entrada)
-                    salida_str  = _to_hms(salida)
-
-                    registros.append({
-                        "Fecha": fecha_str or str(fecha),
-                        "Entrada": entrada_str,
-                        "Salida": salida_str,
-                        "Descripcion": descr
-                    })
-                    fila += 1
-            else:
-                fila += 1
-
-        if not registros:
-            raise Exception("No se detectó el layout esperado en Excel (xlsx).")
-        return armar_resultados(registros, meta)
-
+        file_stream.seek(0)
     except Exception:
-        # --------- Intento 2: .xls (xlrd) ----------
-        if not HAS_XLRD:
-            raise Exception("Intento de leer .xls sin xlrd instalado.")
-        try:
-            book = xlrd.open_workbook(file_contents=data)
-            sheet = book.sheet_by_index(0)
+        pass
 
-            def get(r, c):
-                """ acceso 1-based tipo get(fila, columna) """
-                try:
-                    return sheet.cell_value(r - 1, c - 1)
-                except Exception:
-                    return None
+    head = data[:500].lstrip().lower()
+    if _es_html(head):
+        # HTML exportado con extensión .xls
+        return _procesar_html(data)
 
-            registros = []
-            meta = {"Funcionario": "", "Rut": "", "Organigrama": "", "Turno": "", "Periodo": ""}
+    # No parece HTML → intentamos XLSX
+    return _leer_xlsx_con_openpyxl(BytesIO(data))
 
-            fila = 1
-            max_row = sheet.nrows
-            while fila <= max_row:
-                celda = str(get(fila, 1)).strip().lower()
-                if celda.startswith("funcionario"):
-                    meta["Funcionario"] = str(get(fila, 2)).strip(": ")
-                    meta["Rut"] = str(get(fila + 1, 2)).strip(": ")
-                    meta["Organigrama"] = str(get(fila + 2, 2)).strip(": ")
-                    meta["Turno"] = str(get(fila + 3, 2)).strip(": ")
-                    meta["Periodo"] = str(get(fila + 4, 2)).strip(": ")
-                    fila += 6
-                    continue
 
-                if celda == "dia":
-                    fila += 1
-                    while fila <= max_row and str(get(fila, 1)).strip():
-                        dia_text = str(get(fila, 1)).strip().lower()
-                        if dia_text == "totales":
-                            fila += 1
-                            continue
-                        if dia_text.startswith("funcionario") or dia_text == "none":
-                            break
-
-                        fecha_raw = get(fila, 2)
-                        entrada_raw = get(fila, 3)
-                        salida_raw  = get(fila, 4)
-                        descripcion = str(get(fila, 6) or "").strip()
-
-                        # fecha a dd-mm-aaaa
-                        fecha_date = normalizar_fecha_xls(fecha_raw, book.datemode)
-                        fecha_str = fecha_date.strftime("%d-%m-%Y") if fecha_date else str(fecha_raw)
-
-                        registros.append({
-                            "Fecha": fecha_str,
-                            "Entrada": _to_hms(entrada_raw),
-                            "Salida": _to_hms(salida_raw),
-                            "Descripcion": descripcion
-                        })
-                        fila += 1
-                else:
-                    fila += 1
-
-            if not registros:
-                raise Exception("No se detectó el layout esperado en Excel (xls).")
-            return armar_resultados(registros, meta)
-
-        except Exception as e2:
-            raise Exception(f"No se pudo leer Excel real (.xlsx/.xls): {e2}")
-
-# =================== .XLS “HTML” (PLATAFORMA) ===================
-
-def _decode_html_with_fallback(html_bytes):
-    """
-    Intenta decodificar HTML con varias codificaciones comunes
-    (utf-8, latin-1, cp1252...). Si falla, ignora errores.
-    """
-    encodings = ["utf-8", "utf-8-sig", "latin-1", "cp1252", "iso-8859-1", "windows-1252"]
-    for enc in encodings:
-        try:
-            return html_bytes.decode(enc)
-        except Exception:
-            continue
-    return html_bytes.decode("latin-1", errors="ignore")
-
-def detectar_html_y_procesar(html_bytes):
-    """
-    Lee las tablas del HTML (archivo con extensión .xls generado por la plataforma),
-    intenta mapear columnas y metadatos esperados. Si no puede, devuelve
-    un XLSX con las tablas crudas para no cortar el flujo.
-    """
-    # 1) Decodificar con fallback para soportar acentos/ñ
-    html_text = _decode_html_with_fallback(html_bytes)
-
-    # 2) Intentar leer tablas
-    try:
-        dfs = pd.read_html(html_text, flavor="bs4")  # requiere beautifulsoup4, lxml, html5lib
-    except Exception as e:
-        raise Exception(f"No se pudieron leer tablas HTML: {e}")
-
-    if not dfs:
-        raise Exception("No se encontraron tablas en el archivo HTML.")
-
-    # 3) Extraer metadatos (Funcionario, Rut, Organigrama, Turno, Periodo)
-    meta = {"Funcionario": "", "Rut": "", "Organigrama": "", "Turno": "", "Periodo": ""}
-    for df in dfs:
-        # examina primeras filas buscando pares clave/valor
-        to_check = min(len(df), 12)
-        for i in range(to_check):
-            try:
-                fila = [str(x).strip() for x in list(df.iloc[i].values)]
-            except Exception:
-                continue
-            if len(fila) >= 2:
-                k = fila[0].lower()
-                v = fila[1]
-                if "funcionario" in k:
-                    meta["Funcionario"] = v
-                elif k == "rut" or "rut" in k:
-                    meta["Rut"] = v
-                elif "organigrama" in k:
-                    meta["Organigrama"] = v
-                elif "turno" in k:
-                    meta["Turno"] = v
-                elif "periodo" in k or "período" in k:
-                    meta["Periodo"] = v
-
-    # 4) Buscar la tabla de detalle con columnas de reloj
-    candidatos = []
-    for df in dfs:
-        cols = [str(c).strip().lower() for c in df.columns]
-        tiene_fecha = any(c == "fecha" or "fecha" in c for c in cols)
-        tiene_entrada = any("entrada" in c for c in cols)
-        tiene_salida = any("salida" in c for c in cols)
-        if tiene_fecha and (tiene_entrada or tiene_salida):
-            candidatos.append(df)
-
-    if not candidatos:
-        # Si no hay tabla “obvia”, devolvemos todas crudas
-        return exportar_tablas_crudas(dfs)
-
-    # 5) Elegir candidata con más columnas
-    detalle_df = max(candidatos, key=lambda d: d.shape[1]).fillna("")
-
-    # 6) Mapeo flexible de nombres de columnas
-    def pick(colnames, *opciones):
-        low = [str(c).lower().strip() for c in colnames]
-        for op in opciones:
-            if op in low:
-                return colnames[low.index(op)]
-        return None
-
-    col_fecha = pick(detalle_df.columns, "fecha")
-    col_ent   = pick(detalle_df.columns, "entrada", "hora entrada", "hora de entrada", "ingreso", "hora ingreso")
-    col_sal   = pick(detalle_df.columns, "salida", "hora salida", "hora de salida", "egreso", "hora egreso")
-    col_desc  = pick(detalle_df.columns, "descripcion", "descripción", "observacion", "observación", "detalle", "comentario")
-
-    # 7) Normalizar filas a nuestro esquema (Fecha dd-mm-aaaa, horas HH:MM:SS)
-    registros = []
-    for _, row in detalle_df.iterrows():
-        fecha_raw = row.get(col_fecha, "")
-        ent_raw   = row.get(col_ent, "")
-        sal_raw   = row.get(col_sal, "")
-        des       = row.get(col_desc, "")
-
-        # Fecha a dd-mm-aaaa
-        fecha_str = ""
-        try:
-            f = pd.to_datetime(str(fecha_raw), dayfirst=True, errors="coerce")
-            if pd.notna(f):
-                fecha_str = f.strftime("%d-%m-%Y")
-        except Exception:
-            pass
-
-        registros.append({
-            "Fecha": fecha_str or str(fecha_raw),
-            "Entrada": _to_hms(ent_raw),
-            "Salida": _to_hms(sal_raw),
-            "Descripcion": des
-        })
-
-    # 8) Armar resultado (igual estilo que Excel real)
-    return armar_resultados(registros, meta)
-
-def exportar_tablas_crudas(dfs):
-    """
-    Devuelve un XLSX con todas las tablas encontradas en el HTML,
-    por si el layout cambia y no se puede mapear automáticamente.
-    """
-    out = BytesIO()
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        for i, df in enumerate(dfs, 1):
-            df.to_excel(writer, sheet_name=f"Tabla_{i}", index=False)
-    out.seek(0)
-    return out
-
-# =================== UTIL HORA ===================
-
-def _to_hms(x):
-    """
-    Normaliza formatos de hora comunes a 'HH:MM:SS'.
-    Acepta:
-      - 'HH:MM:SS'
-      - 'HH:MM'
-      - 'HMM' / 'HHMM' (ej. 800 -> 08:00:00)
-      - otros -> '-'
-    """
-    s = str(x).strip()
-    if not s or s.lower() in ("nan", "none", "-"):
-        return "-"
-    if re.match(r"^\d{1,2}:\d{2}:\d{2}$", s):
-        return s
-    if re.match(r"^\d{1,2}:\d{2}$", s):
-        return s + ":00"
-    if re.match(r"^\d{3,4}$", s):
-        s = s.zfill(4)
-        return f"{s[:2]}:{s[2:]}:00"
-    return "-"
+def procesar_excel(file_stream) -> BytesIO:
+    """Alias (app.py puede llamar a cualquiera)."""
+    return detectar_html_y_procesar(file_stream)
