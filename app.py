@@ -4,19 +4,30 @@ from procesador import procesar_excel, detectar_html_y_procesar
 from io import BytesIO
 
 app = Flask(__name__)
-CORS(app)  # permite CORS para que el frontend web pueda llamar al backend
+
+# CORS abierto y exponiendo Content-Disposition para descargas
+CORS(
+    app,
+    resources={r"/*": {"origins": "*"}},
+    supports_credentials=False,
+    expose_headers=["Content-Disposition"]
+)
 
 @app.route("/", methods=["GET"])
 def home():
     return "🟢 Backend Reloj Control activo"
 
-@app.route("/procesar", methods=["POST"])
+@app.route("/procesar", methods=["POST", "OPTIONS"])
 def procesar_archivo():
-    if 'archivo' not in request.files:
+    # Responder preflight del navegador
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    if "archivo" not in request.files:
         return jsonify({"error": "No se envió ningún archivo"}), 400
 
-    file = request.files['archivo']
-    if file.filename == '':
+    file = request.files["archivo"]
+    if file.filename == "":
         return jsonify({"error": "El nombre del archivo está vacío"}), 400
 
     # Leemos en memoria para poder inspeccionarlo
@@ -38,13 +49,12 @@ def procesar_archivo():
 
         return send_file(
             output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             as_attachment=True,
-            download_name='resultado.xlsx'
+            download_name="resultado.xlsx"
         )
 
     except Exception as e:
-        # Mensaje claro si es un .xls HTML con extensión xls
         msg = str(e)
         if "Unsupported format" in msg or "BOF" in msg or "xlrd" in msg:
             return jsonify({
