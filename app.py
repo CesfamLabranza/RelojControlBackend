@@ -5,32 +5,43 @@ from io import BytesIO
 
 app = Flask(__name__)
 
-# CORS abierto y exponiendo Content-Disposition para descargas
+# CORS explícito y robusto (para preflight de FormData)
 CORS(
     app,
     resources={r"/*": {"origins": "*"}},
+    methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+    expose_headers=["Content-Type"],
     supports_credentials=False,
-    expose_headers=["Content-Disposition"]
 )
+
+@app.after_request
+def add_cors_headers(resp):
+    # Refuerzo por si algún proxy elimina cabeceras
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return resp
+
 
 @app.route("/", methods=["GET"])
 def home():
     return "🟢 Backend Reloj Control activo"
 
+
 @app.route("/procesar", methods=["POST", "OPTIONS"])
 def procesar_archivo():
-    # Responder preflight del navegador
+    # Preflight
     if request.method == "OPTIONS":
         return ("", 204)
 
-    if "archivo" not in request.files:
+    if 'archivo' not in request.files:
         return jsonify({"error": "No se envió ningún archivo"}), 400
 
-    file = request.files["archivo"]
-    if file.filename == "":
+    file = request.files['archivo']
+    if file.filename == '':
         return jsonify({"error": "El nombre del archivo está vacío"}), 400
 
-    # Leemos en memoria para poder inspeccionarlo
     contenido = file.read()
     if not contenido:
         return jsonify({"error": "El archivo está vacío"}), 400
@@ -44,14 +55,14 @@ def procesar_archivo():
             # Parseo HTML + cálculo
             output = detectar_html_y_procesar(contenido)
         else:
-            # Excel real: .xls binario o .xlsx
+            # Excel real (e.g., .xlsx)
             output = procesar_excel(BytesIO(contenido))
 
         return send_file(
             output,
-            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             as_attachment=True,
-            download_name="resultado.xlsx"
+            download_name='resultado.xlsx'
         )
 
     except Exception as e:
@@ -68,5 +79,5 @@ def procesar_archivo():
 
 
 if __name__ == "__main__":
-    # Para desarrollo local (Render usa gunicorn via Procfile)
+    # Render usa gunicorn via Procfile; esto es para pruebas locales
     app.run(host="0.0.0.0", port=5000, debug=False)
