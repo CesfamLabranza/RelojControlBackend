@@ -1,9 +1,8 @@
+flask
+flask-cors
+gunicorn
 pandas
 openpyxl
 beautifulsoup4
 lxml
 html5lib
-xlrd
-flask
-flask-cors
-gunicorn
