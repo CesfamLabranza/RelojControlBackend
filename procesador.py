@@ -1,57 +1,70 @@
-import pandas as pd
-from datetime import datetime, time
-from openpyxl import load_workbook, Workbook
-from openpyxl.styles import PatternFill
-from io import BytesIO
 import re
+from io import BytesIO
+from datetime import datetime, time
 
-# ----------------- Utilidades -----------------
+import pandas as pd
+import xlrd  # ✅ para leer .xls
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
 
-def normalizar_fecha(fecha):
+FERIADOS_2025 = [
+    "2025-01-01", "2025-04-18", "2025-04-19", "2025-05-01",
+    "2025-05-21", "2025-06-29", "2025-07-16", "2025-08-15",
+    "2025-09-18", "2025-09-19", "2025-10-12", "2025-10-31",
+    "2025-11-01", "2025-12-08", "2025-12-25"
+]
+FERIADOS_2025 = [datetime.strptime(d, "%Y-%m-%d").date() for d in FERIADOS_2025]
+
+# ----------------- helpers -----------------
+
+def normalizar_fecha_xls(valor, datemode):
     """
-    Convierte valores de fecha de .xls a date.
-    Acepta datetime, 'dd-mm-aaaa', 'dd/mm/aaaa'
+    Convierte un valor de fecha proveniente de .xls a date.
+    Acepta datetime, string 'dd-mm-aaaa' / 'dd/mm/aaaa' o numérico Excel.
     """
-    if isinstance(fecha, datetime):
-        return fecha.date()
+    if isinstance(valor, datetime):
+        return valor.date()
 
-    if fecha is None:
-        return None
-
-    s = str(fecha).strip()
-    if not s or s.lower() == "none":
-        return None
-
-    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d-%m-%y", "%d/%m/%y"):
+    # numérico Excel
+    if isinstance(valor, (int, float)):
         try:
-            return datetime.strptime(s, fmt).date()
+            return xlrd.xldate_as_datetime(valor, datemode).date()
         except Exception:
             pass
 
-    # último intento: pandas puede traer '2025-08-04 00:00:00'
+    # string
     try:
-        return pd.to_datetime(s).date()
+        s = str(valor).strip()
+        if "-" in s:
+            return datetime.strptime(s, "%d-%m-%Y").date()
+        if "/" in s:
+            return datetime.strptime(s, "%d/%m/%Y").date()
     except Exception:
         return None
 
+    return None
+
+def convertir_a_hhmm(horas):
+    minutos = int(round(horas * 60))
+    return f"{minutos // 60:02}:{minutos % 60:02}"
 
 def minutos_a_hhmm(minutos):
-    return f"{int(minutos) // 60:02}:{int(minutos) % 60:02}"
+    return f"{minutos // 60:02}:{minutos % 60:02}"
 
+def obtener_horario_turno(turno, dia_semana):
+    horas = re.findall(r"\d{1,2}:\d{2}", turno or "")
+    if len(horas) < 2:
+        return None, None
+    if dia_semana in [0, 1, 2, 3]:  # Lu-Ju
+        return horas[0], horas[1]
+    if dia_semana == 4 and len(horas) >= 4:  # Vi
+        return horas[2], horas[3]
+    return None, None
 
-def horas_a_hhmm(horas):
-    mins = int(round(horas * 60))
-    return minutos_a_hhmm(mins)
-
-
-def _parse_hora(h):
-    """Acepta time, 'HH:MM:SS', 'HH:MM'."""
-    if h is None or str(h).strip() == "":
+def parse_hora(h):
+    """Devuelve time o None a partir de 'HH:MM:SS' / 'HH:MM' o '-'."""
+    if not h or str(h).strip() == "-" or str(h).strip().lower() == "none":
         return None
-    if isinstance(h, datetime):
-        return h.time()
-    if isinstance(h, time):
-        return h
     s = str(h).strip()
     for fmt in ("%H:%M:%S", "%H:%M"):
         try:
@@ -60,171 +73,150 @@ def _parse_hora(h):
             pass
     return None
 
-
-def obtener_horario_turno(turno, dia_semana):
-    """
-    Extrae horas del texto de turno. Ej: '08:00-17:00 / 08:00-16:00'
-    Para Lu-Ju (0..3) usa el primer par, para Viernes (4) el segundo si existe.
-    """
-    horas = re.findall(r"\d{1,2}:\d{2}", turno or "")
-    # horas en orden: [ini1, fin1, ini2, fin2]
-    if len(horas) < 2:
-        return None, None
-    if dia_semana in [0, 1, 2, 3]:
-        return horas[0], horas[1]
-    if dia_semana == 4 and len(horas) >= 4:
-        return horas[2], horas[3]
-    return None, None
-
-
-def calcular_atraso(entrada, fecha, turno):
-    ent = _parse_hora(entrada)
-    fecha_dt = normalizar_fecha(fecha)
-    if not ent or not fecha_dt:
+def calcular_atraso(entrada, fecha_date, turno):
+    if not entrada:
         return 0
-
-    ini_str, _ = obtener_horario_turno(turno, fecha_dt.weekday())
-    if not ini_str:
+    dia_semana = fecha_date.weekday()
+    inicio_str, _ = obtener_horario_turno(turno, dia_semana)
+    if not inicio_str:
         return 0
-
-    hora_ini = datetime.strptime(ini_str, "%H:%M").time()
-    if ent > hora_ini:
-        return int((datetime.combine(fecha_dt, ent) - datetime.combine(fecha_dt, hora_ini)).total_seconds() / 60)
+    hora_inicio = datetime.strptime(inicio_str, "%H:%M").time()
+    if entrada > hora_inicio:
+        return int(
+            (datetime.combine(fecha_date, entrada) - datetime.combine(fecha_date, hora_inicio)).total_seconds() / 60
+        )
     return 0
 
-
-def calcular_horas_extras(entrada, salida, fecha, turno, descripcion):
-    """
-    Devuelve (horas_50, horas_25) como floats.
-    """
+def calcular_horas_extras(entrada, salida, fecha_date, turno, descripcion):
     if not entrada or not salida:
         return 0, 0
-    if str(descripcion or "").lower() in ("ausente",) or "libre" in str(descripcion or "").lower():
+    desc = (descripcion or "").lower()
+    if "ausente" in desc or "libre" in desc:
         return 0, 0
 
-    ent = _parse_hora(entrada)
-    sal = _parse_hora(salida)
-    fecha_dt = normalizar_fecha(fecha)
-    if not ent or not sal or not fecha_dt:
-        return 0, 0
-
-    ent_dt = datetime.combine(fecha_dt, ent)
-    sal_dt = datetime.combine(fecha_dt, sal)
+    ent_dt = datetime.combine(fecha_date, entrada)
+    sal_dt = datetime.combine(fecha_date, salida)
     if sal_dt < ent_dt:
-        sal_dt += pd.Timedelta(days=1)
+        # pasó medianoche
+        sal_dt = sal_dt.replace(day=sal_dt.day + 1)
 
-    ini_str, fin_str = obtener_horario_turno(turno, fecha_dt.weekday())
-    if not ini_str or not fin_str:
+    dia_semana = fecha_date.weekday()
+    inicio_str, fin_str = obtener_horario_turno(turno, dia_semana)
+
+    # sin horario: todo lo trabajado cuenta como 25% si supera 30 min
+    if not inicio_str or not fin_str:
         total_min = (sal_dt - ent_dt).total_seconds() / 60
-        return ((total_min / 60), 0) if total_min > 30 else (0, 0)
+        return (total_min / 60, 0) if total_min > 30 else (0, 0)
 
-    hora_ini = datetime.combine(fecha_dt, datetime.strptime(ini_str, "%H:%M").time())
-    hora_fin = datetime.combine(fecha_dt, datetime.strptime(fin_str, "%H:%M").time())
+    hora_inicio = datetime.combine(fecha_date, datetime.strptime(inicio_str, "%H:%M").time())
+    hora_fin = datetime.combine(fecha_date, datetime.strptime(fin_str, "%H:%M").time())
 
-    min_50 = 0
-    min_25 = 0
+    minutos_50 = 0
+    minutos_25 = 0
 
-    # antes de la jornada
-    if ent_dt < hora_ini:
+    if ent_dt < hora_inicio:
+        # antes de hora de inicio
         if ent_dt.time() < time(7, 0):
-            min_50 += (min(sal_dt, hora_ini) - ent_dt).total_seconds() / 60
+            minutos_50 += (min(sal_dt, hora_inicio) - ent_dt).total_seconds() / 60
         else:
-            min_25 += (min(sal_dt, hora_ini) - ent_dt).total_seconds() / 60
+            minutos_25 += (min(sal_dt, hora_inicio) - ent_dt).total_seconds() / 60
 
-    # después de la jornada
     if sal_dt > hora_fin:
-        if sal_dt > datetime.combine(fecha_dt, time(21, 0)):
-            min_25 += max(0, (datetime.combine(fecha_dt, time(21, 0)) - hora_fin).total_seconds() / 60)
-            min_50 += (sal_dt - datetime.combine(fecha_dt, time(21, 0))).total_seconds() / 60
+        if sal_dt.time() > time(21, 0):
+            minutos_25 += max(0, (datetime.combine(fecha_date, time(21, 0)) - hora_fin).total_seconds() / 60)
+            minutos_50 += (sal_dt - datetime.combine(fecha_date, time(21, 0))).total_seconds() / 60
         else:
-            min_25 += (sal_dt - hora_fin).total_seconds() / 60
+            minutos_25 += (sal_dt - hora_fin).total_seconds() / 60
 
-    h50 = round(min_50 / 60, 2) if min_50 > 30 else 0
-    h25 = round(min_25 / 60, 2) if min_25 > 30 else 0
-    return h50, h25
+    horas_50 = round(minutos_50 / 60, 2) if minutos_50 > 30 else 0
+    horas_25 = round(minutos_25 / 60, 2) if minutos_25 > 30 else 0
+    return horas_50, horas_25
 
+# ----------------- procesador principal (.xls -> .xlsx) -----------------
 
-# ----------------- PROCESADOR PRINCIPAL (.xls) -----------------
+def procesar_excel(file_stream: BytesIO) -> BytesIO:
+    # Abrimos .xls con xlrd
+    book = xlrd.open_workbook(file_contents=file_stream.read())
+    sheet = book.sheet_by_index(0)
 
-def procesar_excel(file_stream):
-    """
-    Lee el .xls (engine=xlrd) que subes, genera un .xlsx con:
-    - 'Detalle Diario'
-    - 'Resumen'
-    y colorea filas según descripción.
-    """
-    # Leemos TODO como texto para facilitar búsquedas (formato fijo)
-    df = pd.read_excel(file_stream, header=None, dtype=str, engine="xlrd")
-    df = df.fillna("")
+    def get(r, c):
+        """1-based como antes: get(fila, columna)."""
+        try:
+            return sheet.cell_value(r - 1, c - 1)
+        except Exception:
+            return None
 
     data_detalle = []
-    resumen = {}
-
-    i = 0
-    n = len(df)
+    data_resumen = {}
+    fila = 1
+    max_row = sheet.nrows
 
     funcionario = rut = organigrama = turno = periodo = ""
 
-    while i < n:
-        col0 = str(df.iat[i, 0]).strip().lower()
-
-        # Bloque de encabezado de funcionario
-        if col0.startswith("funcionario"):
-            funcionario = str(df.iat[i, 1]).strip(": ").strip()
-            rut         = str(df.iat[i + 1, 1]).strip(": ").strip() if i + 1 < n else ""
-            organigrama = str(df.iat[i + 2, 1]).strip(": ").strip() if i + 2 < n else ""
-            turno       = str(df.iat[i + 3, 1]).strip(": ").strip() if i + 3 < n else ""
-            periodo     = str(df.iat[i + 4, 1]).strip(": ").strip() if i + 4 < n else ""
-            i += 6
+    while fila <= max_row:
+        celda = str(get(fila, 1)).strip().lower()
+        if celda.startswith("funcionario"):
+            funcionario = str(get(fila, 2)).strip(": ")
+            rut = str(get(fila + 1, 2)).strip(": ")
+            organigrama = str(get(fila + 2, 2)).strip(": ")
+            turno = str(get(fila + 3, 2)).strip(": ")
+            periodo = str(get(fila + 4, 2)).strip(": ")
+            fila += 6
             continue
 
-        # Encabezado de tabla diaria
-        if col0 == "dia":
-            i += 1
-            # Recorrer filas de detalle hasta que aparezca otra cabecera o vacío
-            while i < n:
-                dia_txt = str(df.iat[i, 0]).strip().lower()
-                if dia_txt in ("", "none", "totales"):
-                    i += 1
+        if celda == "dia":
+            fila += 1
+            while fila <= max_row and str(get(fila, 1)).strip():
+                dia_text = str(get(fila, 1)).strip().lower()
+                if dia_text == "totales":
+                    fila += 1
                     continue
-                if dia_txt.startswith("funcionario"):
-                    # termina este bloque
+                if dia_text.startswith("funcionario") or dia_text == "none":
                     break
 
-                fecha = df.iat[i, 1]
-                entrada = df.iat[i, 2]
-                salida = df.iat[i, 3]
-                # columna 5 (index 5) suele ser 'Descripción'
-                descripcion = str(df.iat[i, 5]).strip()
+                fecha_raw = get(fila, 2)
+                entrada_raw = get(fila, 3)
+                salida_raw = get(fila, 4)
+                descripcion = str(get(fila, 6) or "").strip()
 
-                # convertir algunos posibles formatos de hora
-                atras_min = calcular_atraso(entrada, fecha, turno)
-                h50, h25 = calcular_horas_extras(entrada, salida, fecha, turno, descripcion)
+                # fecha como date
+                fecha_date = normalizar_fecha_xls(fecha_raw, book.datemode)
+                # horas como time
+                entrada_t = parse_hora(entrada_raw)
+                salida_t  = parse_hora(salida_raw)
+
+                atraso_min = 0
+                horas_50 = horas_25 = 0
+
+                if fecha_date:
+                    atraso_min = calcular_atraso(entrada_t, fecha_date, turno)
+                    h50, h25 = calcular_horas_extras(entrada_t, salida_t, fecha_date, turno, descripcion)
+                    horas_50, horas_25 = h50, h25
 
                 data_detalle.append([
                     funcionario, rut, organigrama, turno, periodo,
-                    fecha, entrada, salida,
-                    minutos_a_hhmm(atras_min),
-                    horas_a_hhmm(h50),
-                    horas_a_hhmm(h25),
+                    fecha_date.strftime("%d-%m-%Y") if fecha_date else "",
+                    entrada_raw if entrada_t else "-",
+                    salida_raw if salida_t else "-",
+                    minutos_a_hhmm(atraso_min),
+                    convertir_a_hhmm(horas_50),
+                    convertir_a_hhmm(horas_25),
                     descripcion
                 ])
 
-                if funcionario not in resumen:
-                    resumen[funcionario] = {
+                if funcionario not in data_resumen:
+                    data_resumen[funcionario] = {
                         "Rut": rut, "Organigrama": organigrama, "Turno": turno, "Periodo": periodo,
-                        "Total 50%": 0.0, "Total 25%": 0.0, "Total Atraso": 0
+                        "Total 50%": 0, "Total 25%": 0, "Total Atraso": 0
                     }
-                resumen[funcionario]["Total 50%"] += h50
-                resumen[funcionario]["Total 25%"] += h25
-                resumen[funcionario]["Total Atraso"] += atras_min
+                data_resumen[funcionario]["Total 50%"] += horas_50
+                data_resumen[funcionario]["Total 25%"] += horas_25
+                data_resumen[funcionario]["Total Atraso"] += atraso_min
 
-                i += 1
-            continue
+                fila += 1
+        else:
+            fila += 1
 
-        i += 1
-
-    # DataFrames
     df_detalle = pd.DataFrame(data_detalle, columns=[
         "Funcionario", "Rut", "Organigrama", "Turno", "Periodo",
         "Fecha", "Entrada", "Salida", "Atraso (hh:mm)", "50%", "25%", "Descripción"
@@ -232,44 +224,42 @@ def procesar_excel(file_stream):
 
     df_resumen = pd.DataFrame([
         [
-            f,
-            datos["Rut"], datos["Organigrama"], datos["Turno"], datos["Periodo"],
-            horas_a_hhmm(datos["Total 50%"]),
-            horas_a_hhmm(datos["Total 25%"]),
-            minutos_a_hhmm(datos["Total Atraso"]),
-            horas_a_hhmm(datos["Total 50%"] + datos["Total 25%"]),
+            f, data_resumen[f]["Rut"], data_resumen[f]["Organigrama"], data_resumen[f]["Turno"],
+            data_resumen[f]["Periodo"],
+            convertir_a_hhmm(data_resumen[f]["Total 50%"]),
+            convertir_a_hhmm(data_resumen[f]["Total 25%"]),
+            minutos_a_hhmm(data_resumen[f]["Total Atraso"]),
+            convertir_a_hhmm(data_resumen[f]["Total 50%"] + data_resumen[f]["Total 25%"])
         ]
-        for f, datos in resumen.items()
-    ], columns=["Funcionario", "Rut", "Organigrama", "Turno", "Periodo", "Total 50%", "Total 25%", "Total Atraso", "Total Horas"])
+        for f in data_resumen
+    ], columns=["Funcionario", "Rut", "Organigrama", "Turno", "Periodo",
+                "Total 50%", "Total 25%", "Total Atraso", "Total Horas"])
 
-    # Escribir a xlsx en memoria
-    mem = BytesIO()
-    with pd.ExcelWriter(mem, engine="openpyxl") as writer:
+    # --- Generar XLSX de salida con formato ---
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df_detalle.to_excel(writer, sheet_name="Detalle Diario", index=False)
         df_resumen.to_excel(writer, sheet_name="Resumen", index=False)
 
-    mem.seek(0)
-    wb = load_workbook(mem)
-    ws = wb["Detalle Diario"]
+    output.seek(0)
+    wb_final = load_workbook(output)
+    ws = wb_final["Detalle Diario"]
 
-    # Colores
-    fill_rojo = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")     # Ausente
-    fill_amar = PatternFill(start_color="FFFACD", end_color="FFFACD", fill_type="solid")     # Falta entrada/salida o '-'
+    fill_rojo = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    fill_amarillo = PatternFill(start_color="FFFACD", end_color="FFFACD", fill_type="solid")
 
-    # Aplicar color por fila
     for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=12):
         descripcion = str(row[11].value or "")
         entrada = str(row[6].value or "").strip()
-        salida  = str(row[7].value or "").strip()
+        salida = str(row[7].value or "").strip()
+        if "Ausente" in descripcion:
+            for cell in row:
+                cell.fill = fill_rojo
+        elif "Falta Entrada" in descripcion or "Falta Salida" in descripcion or entrada == "-" or salida == "-":
+            for cell in row:
+                cell.fill = fill_amarillo
 
-        if "ausente" in descripcion.lower():
-            for c in row:
-                c.fill = fill_rojo
-        elif "falta entrada" in descripcion.lower() or "falta salida" in descripcion.lower() or entrada == "-" or salida == "-":
-            for c in row:
-                c.fill = fill_amar
-
-    out = BytesIO()
-    wb.save(out)
-    out.seek(0)
-    return out
+    final_output = BytesIO()
+    wb_final.save(final_output)
+    final_output.seek(0)
+    return final_output
