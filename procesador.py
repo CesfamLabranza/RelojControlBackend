@@ -284,7 +284,7 @@ def procesar_excel(file_stream: BytesIO) -> BytesIO:
                 meta["Rut"] = str(sh.cell(row=fila + 1, column=2).value or "").strip(": ")
                 meta["Organigrama"] = str(sh.cell(row=fila + 2, column=2).value or "").strip(": ")
                 meta["Turno"] = str(sh.cell(row=fila + 3, column=2).value or "").strip(": ")
-                meta["Periodo"] = str(sh.cell(row	fila + 4, column=2).value or "").strip(": ")
+                meta["Periodo"] = str(sh.cell(row=fila + 4, column=2).value or "").strip(": ")
                 fila += 6
                 continue
 
