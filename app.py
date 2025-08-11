@@ -1,11 +1,10 @@
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
+from procesador import procesar_excel
 from io import BytesIO
 
-from procesador import procesar_excel
-
 app = Flask(__name__)
-CORS(app)  # permitir CORS desde tu frontend
+CORS(app)  # permitir CORS
 
 @app.route("/")
 def home():
@@ -13,24 +12,25 @@ def home():
 
 @app.route("/procesar", methods=["POST"])
 def procesar_archivo():
-    # ⚠️ el campo se llama 'archivo' (coincide con el frontend)
     if "archivo" not in request.files:
         return jsonify({"error": "No se envió ningún archivo"}), 400
 
-    f = request.files["archivo"]
-    if f.filename == "":
+    file = request.files["archivo"]
+
+    if file.filename == "":
         return jsonify({"error": "El nombre del archivo está vacío"}), 400
 
-    # Sólo aceptar .xls (no .xlsx)
-    if not f.filename.lower().endswith(".xls"):
+    # ✅ Aceptamos .xls (lo que tú subirás)
+    if not file.filename.lower().endswith(".xls"):
         return jsonify({"error": "Sólo se aceptan archivos .xls"}), 400
 
     try:
-        contenido = f.read()
-        salida = procesar_excel(BytesIO(contenido))
+        # Pasamos el stream al procesador
+        stream = BytesIO(file.read())
+        output = procesar_excel(stream)
 
         return send_file(
-            salida,
+            output,
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             as_attachment=True,
             download_name="resultado.xlsx",
